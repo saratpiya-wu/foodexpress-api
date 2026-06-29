@@ -52,7 +52,7 @@ pipeline {
             }
         }
 
-        stage('Terraform Init') {
+        stage('Terraform Init & Plan & Apply') {
             steps {
                 dir("${TF_DIR}") {
                     withCredentials([
@@ -60,48 +60,28 @@ pipeline {
                             credentialsId: 'aws-creds',
                             usernameVariable: 'AWS_ACCESS_KEY_ID',
                             passwordVariable: 'AWS_SECRET_ACCESS_KEY'
-                        )
-                    ]) {
-                        sh 'terraform init -input=false'
-                    }
-                }
-            }
-        }
-
-        stage('Terraform Plan') {
-            steps {
-                dir("${TF_DIR}") {
-                    withCredentials([
-                        usernamePassword(
-                            credentialsId: 'aws-creds',
-                            usernameVariable: 'AWS_ACCESS_KEY_ID',
-                            passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                        ),
+                        string(
+                            credentialsId: 'aws-session-token',
+                            variable: 'AWS_SESSION_TOKEN'
                         )
                     ]) {
                         sh """
+                            export AWS_ACCESS_KEY_ID=\$AWS_ACCESS_KEY_ID
+                            export AWS_SECRET_ACCESS_KEY=\$AWS_SECRET_ACCESS_KEY
+                            export AWS_SESSION_TOKEN=\$AWS_SESSION_TOKEN
+
+                            terraform init -input=false
+
                             terraform plan -input=false \
                               -var="aws_region=${params.AWS_REGION}" \
                               -var="instance_type=${params.INSTANCE_TYPE}" \
                               -var="key_name=${params.KEY_NAME}" \
                               -var="docker_image=${IMAGE_NAME}:${IMAGE_TAG}" \
                               -out=tfplan
-                        """
-                    }
-                }
-            }
-        }
 
-        stage('Terraform Apply') {
-            steps {
-                dir("${TF_DIR}") {
-                    withCredentials([
-                        usernamePassword(
-                            credentialsId: 'aws-creds',
-                            usernameVariable: 'AWS_ACCESS_KEY_ID',
-                            passwordVariable: 'AWS_SECRET_ACCESS_KEY'
-                        )
-                    ]) {
-                        sh 'terraform apply -input=false -auto-approve tfplan'
+                            terraform apply -input=false -auto-approve tfplan
+                        """
                     }
                 }
             }
@@ -115,9 +95,19 @@ pipeline {
                             credentialsId: 'aws-creds',
                             usernameVariable: 'AWS_ACCESS_KEY_ID',
                             passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                        ),
+                        string(
+                            credentialsId: 'aws-session-token',
+                            variable: 'AWS_SESSION_TOKEN'
                         )
                     ]) {
-                        sh 'terraform output public_ip'
+                        sh """
+                            export AWS_ACCESS_KEY_ID=\$AWS_ACCESS_KEY_ID
+                            export AWS_SECRET_ACCESS_KEY=\$AWS_SECRET_ACCESS_KEY
+                            export AWS_SESSION_TOKEN=\$AWS_SESSION_TOKEN
+
+                            terraform output public_ip
+                        """
                     }
                 }
             }
@@ -126,11 +116,11 @@ pipeline {
 
     post {
         success {
-            echo "Deployment complete - new FoodExpress EC2 instance is running ${IMAGE_NAME}:${IMAGE_TAG}."
+            echo "✅ Deployment complete - EC2 instance is running ${IMAGE_NAME}:${IMAGE_TAG}"
         }
 
         failure {
-            echo "Pipeline failed - check the stage logs above."
+            echo "❌ Pipeline failed - check logs"
         }
 
         always {
