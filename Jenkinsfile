@@ -1,12 +1,23 @@
 pipeline {
     agent any
 
+    parameters {
+        string(name: 'KEY_NAME', defaultValue: 'foodexpress-key', description: 'Existing AWS EC2 key pair name')
+        string(name: 'AWS_REGION', defaultValue: 'ap-southeast-1', description: 'AWS region to deploy into')
+        string(name: 'INSTANCE_TYPE', defaultValue: 't2.micro', description: 'EC2 instance type')
+    }
+
     environment {
-        DOCKERHUB_CREDENTIALS = credentials('dockerhub-creds')
-        AWS_CREDENTIALS       = credentials('aws-creds')
-        DOCKER_IMAGE          = "saratpiya17/foodexpress"
-        IMAGE_TAG             = "${BUILD_NUMBER}"
-        EC2_KEY_NAME          = "foodexpress-key"   // name of your AWS key pair
+        // Jenkins credential IDs you must create beforehand (see notes below)
+        DOCKERHUB_CREDS       = credentials('dockerhub-creds')   // type: Username with password
+        AWS_CREDS             = credentials('aws-creds')         // type: Username with password (Access Key / Secret Key)
+        AWS_ACCESS_KEY_ID     = "${AWS_CREDS_USR}"
+        AWS_SECRET_ACCESS_KEY = "${AWS_CREDS_PSW}"
+
+        IMAGE_NAME = "saratpiya17/foodexpress"   // <-- change to your actual Docker Hub repo
+        IMAGE_TAG  = "${BUILD_NUMBER}"
+        APP_DIR    = "app"
+        TF_DIR     = "terraform"
     }
 
     stages {
@@ -19,73 +30,69 @@ pipeline {
 
         stage('Build Docker Image') {
             steps {
-                dir('app') {
-                    sh "docker build -t ${DOCKER_IMAGE}:${IMAGE_TAG} -t ${DOCKER_IMAGE}:latest ."
+                dir("${APP_DIR}") {
+                    sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -t ${IMAGE_NAME}:latest ."
                 }
             }
         }
 
         stage('Push Docker Image') {
             steps {
-                sh "echo ${DOCKERHUB_CREDENTIALS_PSW} | docker login -u ${DOCKERHUB_CREDENTIALS_USR} --password-stdin"
-                sh "docker push ${DOCKER_IMAGE}:${IMAGE_TAG}"
-                sh "docker push ${DOCKER_IMAGE}:latest"
+                sh "echo ${DOCKERHUB_CREDS_PSW} | docker login -u ${DOCKERHUB_CREDS_USR} --password-stdin"
+                sh "docker push ${IMAGE_NAME}:${IMAGE_TAG}"
+                sh "docker push ${IMAGE_NAME}:latest"
             }
         }
 
-        stage('Terraform Init & Apply') {
-            environment {
-                AWS_ACCESS_KEY_ID     = "${AWS_CREDENTIALS_USR}"
-                AWS_SECRET_ACCESS_KEY = "${AWS_CREDENTIALS_PSW}"
-            }
+        stage('Terraform Init') {
             steps {
-                dir('terraform') {
+                dir("${TF_DIR}") {
                     sh 'terraform init -input=false'
+                }
+            }
+        }
+
+        stage('Terraform Plan') {
+            steps {
+                dir("${TF_DIR}") {
                     sh """
-                        terraform apply -auto-approve \
-                          -var="docker_image=${DOCKER_IMAGE}:${IMAGE_TAG}" \
-                          -var="key_name=${EC2_KEY_NAME}"
+                        terraform plan -input=false \
+                          -var="aws_region=${params.AWS_REGION}" \
+                          -var="instance_type=${params.INSTANCE_TYPE}" \
+                          -var="key_name=${params.KEY_NAME}" \
+                          -var="docker_image=${IMAGE_NAME}:${IMAGE_TAG}" \
+                          -out=tfplan
                     """
                 }
             }
         }
 
-        stage('Deploy / Update Container on EC2') {
+        stage('Terraform Apply (provision new instance)') {
             steps {
-                dir('terraform') {
-                    script {
-                        env.EC2_PUBLIC_IP = sh(
-                            script: 'terraform output -raw public_ip',
-                            returnStdout: true
-                        ).trim()
-                    }
-                }
-                sshagent(['ec2-ssh-key']) {
-                    sh """
-                        ssh -o StrictHostKeyChecking=no ubuntu@${EC2_PUBLIC_IP} '
-                            sudo docker pull ${DOCKER_IMAGE}:${IMAGE_TAG} &&
-                            sudo docker stop foodexpress || true &&
-                            sudo docker rm foodexpress || true &&
-                            sudo docker run -d --restart unless-stopped -p 80:5000 --name foodexpress ${DOCKER_IMAGE}:${IMAGE_TAG}
-                        '
-                    """
+                dir("${TF_DIR}") {
+                    sh 'terraform apply -input=false -auto-approve tfplan'
                 }
             }
         }
 
-        stage('Show App URL') {
+        stage('Show Output') {
             steps {
-                echo "FoodExpress API is live at: http://${EC2_PUBLIC_IP}/"
+                dir("${TF_DIR}") {
+                    sh 'terraform output public_ip'
+                }
             }
         }
     }
 
     post {
         success {
-            echo "Pipeline completed successfully."
+            echo "Deployment complete - new FoodExpress EC2 instance is running ${IMAGE_NAME}:${IMAGE_TAG}."
         }
         failure {
-            echo "Pipeline failed — check the stage logs above."
+            echo "Pipeline failed - check the stage logs above."
+        }
+        always {
+            sh 'docker logout || true'
         }
     }
 }
